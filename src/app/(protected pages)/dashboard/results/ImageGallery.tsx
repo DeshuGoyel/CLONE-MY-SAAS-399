@@ -4,6 +4,7 @@ import Image from "next/image";
 import { trackDownload } from "@/action/trackDownload";
 import React, { useState, useEffect } from "react";
 import { fixDiscrepancy } from "@/action/fixDiscrepancy";
+import ImagePreviewModal from "./ImagePreviewModal";
 
 interface ImageGalleryProps {
   images: string[];
@@ -32,6 +33,7 @@ export default function ImageGallery({
     userData?.promptsResult || []
   );
   const [isLoading, setIsLoading] = useState(true);
+  const [previewIndex, setPreviewIndex] = useState<number | null>(null);
 
   const handleDownload = async (index: number) => {
     const imageUrl = displayImages[index];
@@ -99,6 +101,50 @@ export default function ImageGallery({
       ? promptsResult.map((result) => result.data.prompt.images[0])
       : images;
 
+  const handleImageClick = (index: number) => {
+    setPreviewIndex(index);
+  };
+
+  const handleClosePreview = () => {
+    setPreviewIndex(null);
+  };
+
+  const handleNextImage = () => {
+    if (previewIndex !== null && previewIndex < displayImages.length - 1) {
+      setPreviewIndex(previewIndex + 1);
+    }
+  };
+
+  const handlePreviousImage = () => {
+    if (previewIndex !== null && previewIndex > 0) {
+      setPreviewIndex(previewIndex - 1);
+    }
+  };
+
+  const handleDownloadFromPreview = async () => {
+    if (previewIndex !== null) {
+      await handleDownload(previewIndex);
+    }
+  };
+
+  // Add keyboard navigation
+  useEffect(() => {
+    if (previewIndex === null) return;
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setPreviewIndex(null);
+      } else if (e.key === "ArrowRight" && previewIndex < displayImages.length - 1) {
+        setPreviewIndex(previewIndex + 1);
+      } else if (e.key === "ArrowLeft" && previewIndex > 0) {
+        setPreviewIndex(previewIndex - 1);
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [previewIndex, displayImages.length]);
+
   return (
     <>
       <div className="mb-4 p-4 bg-mainOrange/10 border border-mainOrange/30 text-mainBlack rounded-lg shadow-sm">
@@ -115,7 +161,7 @@ export default function ImageGallery({
           <div
             key={index}
             className="aspect-square relative overflow-hidden rounded-lg transition-transform duration-300 ease-in-out hover:scale-[1.02] hover:shadow-lg group cursor-pointer"
-            onClick={() => handleDownload(index)}
+            onClick={() => handleImageClick(index)}
           >
             <Image
               src={src}
@@ -139,16 +185,21 @@ export default function ImageGallery({
               </div>
             )}
 
-            {/* Download button */}
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                handleDownload(index);
-              }}
-              className="absolute bottom-0 left-0 right-0 h-28 bg-gradient-to-b from-transparent via-mainBlack/70 to-mainBlack text-2xl font-semibold px-4 py-2 opacity-0 group-hover:opacity-100 transition-opacity duration-300 hover:from-transparent hover:via-mainBlack/80 hover:to-mainBlack flex items-end justify-center pb-4"
-            >
-              Download High-Resolution
-            </button>
+            {/* Preview/Download overlay */}
+            <div className="absolute bottom-0 left-0 right-0 h-28 bg-gradient-to-b from-transparent via-mainBlack/70 to-mainBlack opacity-0 group-hover:opacity-100 transition-opacity duration-300 flex items-end justify-center pb-4">
+              <div className="flex flex-col items-center gap-2">
+                <span className="text-white text-sm">Click to preview</span>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleDownload(index);
+                  }}
+                  className="text-mainOrange hover:text-[#E0B50E] text-xs font-semibold underline"
+                >
+                  or download directly
+                </button>
+              </div>
+            </div>
           </div>
         ))}
 
@@ -178,6 +229,22 @@ export default function ImageGallery({
             </div>
           ))}
       </div>
+
+      {/* Image Preview Modal */}
+      {previewIndex !== null && (
+        <ImagePreviewModal
+          isOpen={previewIndex !== null}
+          imageUrl={displayImages[previewIndex]}
+          imageIndex={previewIndex}
+          onClose={handleClosePreview}
+          onDownload={handleDownloadFromPreview}
+          onNext={handleNextImage}
+          onPrevious={handlePreviousImage}
+          hasNext={previewIndex < displayImages.length - 1}
+          hasPrevious={previewIndex > 0}
+          isDownloaded={downloadHistory.includes(displayImages[previewIndex])}
+        />
+      )}
     </>
   );
 }
