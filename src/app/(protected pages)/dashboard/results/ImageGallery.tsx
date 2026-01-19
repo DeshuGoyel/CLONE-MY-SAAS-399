@@ -109,7 +109,6 @@ export default function ImageGallery({
     checkDiscrepancy();
   }, []);
 
-<<<<<<< HEAD
   // Auto-open preview modal when images are available and not already open
   React.useEffect(() => {
     if (displayImages.length > 0 && previewIndex === null && !isLoading) {
@@ -117,8 +116,6 @@ export default function ImageGallery({
     }
   }, [displayImages.length, previewIndex, isLoading, promptsResult]);
 
-=======
->>>>>>> 6c4436a0015bbb56033bc83a10a1ed94dbe20892
   const handleImageClick = (index: number) => {
     setPreviewIndex(index);
   };
