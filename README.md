@@ -21,6 +21,15 @@ npm run dev
 
 Then open http://localhost:3000.
 
+### Full Setup Instructions
+
+For complete setup instructions including:
+- Supabase database and storage configuration
+- Environment variable configuration
+- Automated cleanup setup
+
+See the [SETUP_GUIDE.md](SETUP_GUIDE.md) and [supabase/README.md](supabase/README.md) for detailed step-by-step instructions.
+
 PIN code to documentation: JT24
 
 Any illegal distribution or bad behaviour will be banned from this repo and you will not receive: 1) Upcoming features. 2) No shoutout from my Twitter account when you launch. 3) Lose access to this repo permanently.
