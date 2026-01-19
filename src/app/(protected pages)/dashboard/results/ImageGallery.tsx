@@ -41,6 +41,13 @@ export default function ImageGallery({
       ? promptsResult.map((result) => result.data.prompt.images[0])
       : images;
 
+  // Auto-open preview modal when images are available and not already open
+  React.useEffect(() => {
+    if (displayImages.length > 0 && previewIndex === null && !isLoading) {
+      setPreviewIndex(0);
+    }
+  }, [displayImages.length, previewIndex, isLoading, promptsResult]);
+
   const handleDownload = async (index: number) => {
     const imageUrl = displayImages[index];
     const result = await trackDownload(imageUrl, userData);
@@ -102,6 +109,7 @@ export default function ImageGallery({
     checkDiscrepancy();
   }, []);
 
+<<<<<<< HEAD
   // Auto-open preview modal when images are available and not already open
   React.useEffect(() => {
     if (displayImages.length > 0 && previewIndex === null && !isLoading) {
@@ -109,6 +117,8 @@ export default function ImageGallery({
     }
   }, [displayImages.length, previewIndex, isLoading, promptsResult]);
 
+=======
+>>>>>>> 6c4436a0015bbb56033bc83a10a1ed94dbe20892
   const handleImageClick = (index: number) => {
     setPreviewIndex(index);
   };
