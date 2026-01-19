@@ -107,14 +107,14 @@ export default function ImageGallery({
       setIsLoading(false);
     }
     checkDiscrepancy();
-  }, []);
+  }, [currentCount, planLimit, userData]);
 
   // Auto-open preview modal when images are available and not already open
   React.useEffect(() => {
     if (displayImages.length > 0 && previewIndex === null && !isLoading) {
       setPreviewIndex(0);
     }
-  }, [displayImages.length, previewIndex, isLoading, promptsResult]);
+  }, [displayImages.length, previewIndex, isLoading, promptsResult, userData]);
 
   const handleImageClick = (index: number) => {
     setPreviewIndex(index);
