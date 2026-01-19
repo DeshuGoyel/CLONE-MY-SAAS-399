@@ -11,6 +11,16 @@ Star this repo to be notified with new updates and upcoming features.
 
 1. Follow the [Get Started Tutorial](https://www.clonemysaas.com/docs) to clone the repo and run your local server.
 
+### Local development (quick start)
+
+```bash
+npm install
+cp .env.example .env.local
+npm run dev
+```
+
+Then open http://localhost:3000.
+
 PIN code to documentation: JT24
 
 Any illegal distribution or bad behaviour will be banned from this repo and you will not receive: 1) Upcoming features. 2) No shoutout from my Twitter account when you launch. 3) Lose access to this repo permanently.
