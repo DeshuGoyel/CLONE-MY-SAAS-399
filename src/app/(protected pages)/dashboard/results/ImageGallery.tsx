@@ -41,13 +41,6 @@ export default function ImageGallery({
       ? promptsResult.map((result) => result.data.prompt.images[0])
       : images;
 
-  // Auto-open preview modal when images are available and not already open
-  React.useEffect(() => {
-    if (displayImages.length > 0 && previewIndex === null && !isLoading) {
-      setPreviewIndex(0);
-    }
-  }, [displayImages.length, previewIndex, isLoading, promptsResult]);
-
   const handleDownload = async (index: number) => {
     const imageUrl = displayImages[index];
     const result = await trackDownload(imageUrl, userData);
