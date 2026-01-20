@@ -1,189 +1,218 @@
 import { createClient } from "@supabase/supabase-js";
 import { NextResponse } from "next/server";
+import { logger } from "@/lib/logger";
+import { validateWebhookSecret, processWebhookWithRetry, generateIdempotencyKey, checkIdempotency } from "@/lib/webhookHelpers";
+import { generateRequestId } from "@/lib/apiHelpers";
+
 export const dynamic = "force-dynamic";
 
-// Environment variables for Supabase and webhook secret1
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL; // Supabase URL
-const supabaseServiceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY; // Supabase service role key
-const appWebhookSecret = process.env.APP_WEBHOOK_SECRET; // Webhook secret for authentication
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+const supabaseServiceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const appWebhookSecret = process.env.APP_WEBHOOK_SECRET;
 
-// Check for required environment variables
 if (!supabaseUrl) {
-  throw new Error("MISSING NEXT_PUBLIC_SUPABASE_URL!"); // Error if Supabase URL is missing
+  throw new Error("MISSING NEXT_PUBLIC_SUPABASE_URL!");
 }
 
 if (!supabaseServiceRoleKey) {
-  throw new Error("MISSING SUPABASE_SERVICE_ROLE_KEY!"); // Error if service role key is missing
+  throw new Error("MISSING SUPABASE_SERVICE_ROLE_KEY!");
 }
 
 if (!appWebhookSecret) {
-  throw new Error("MISSING APP_WEBHOOK_SECRET!"); // Error if webhook secret is missing
+  throw new Error("MISSING APP_WEBHOOK_SECRET!");
 }
 
+const processedWebhooks = new Set<string>();
+
 export async function POST(request: Request) {
-
-  // Parse incoming JSON data as unknown
-  const incomingData = await request.json() as unknown;
-
-
-  // Extract user_id and webhook_secret from the request URL
-  const urlObj = new URL(request.url);
-  const user_id = urlObj.searchParams.get("user_id");
-  const webhook_secret = urlObj.searchParams.get("webhook_secret");
-
-
-  // Check for webhook_secret in the URL
-  if (!webhook_secret) {
-    return NextResponse.json(
-      { message: "Malformed URL, no webhook_secret detected!" },
-      { status: 400 }
-    );
-  }
-
-  // Validate the webhook_secret against the stored secret
-  if (webhook_secret.toLowerCase() !== appWebhookSecret?.toLowerCase()) {
-    return NextResponse.json({ message: "Unauthorized!" }, { status: 401 });
-  }
-
-  // Check for user_id in the URL
-  if (!user_id) {
-    return NextResponse.json(
-      { message: "Malformed URL, no user_id detected!" },
-      { status: 400 }
-    );
-  }
-
-  // Create a Supabase client
-  const supabase = createClient(
-    supabaseUrl as string,
-    supabaseServiceRoleKey as string,
-    {
-      auth: {
-        autoRefreshToken: false,
-        persistSession: false,
-        detectSessionInUrl: false,
-      },
-    }
-  );
-
-  // Fetch user data from the custom userTable
-  const { data: userData, error: userError } = await supabase
-    .from('userTable')
-    .select('*')
-    .eq('id', user_id)
-    .single();
-
-  // Add debug logging for user data
-  console.log('User data from userTable:', JSON.stringify(userData, null, 2));
-
-  // Handle errors in fetching user
-  if (userError) {
-    console.error('Error fetching user from userTable:', userError);
-    return NextResponse.json(
-      {
-        message: userError.message,
-      },
-      { status: 401 }
-    );
-  }
-
-  // Check if user exists
-  if (!userData) {
-    console.log('User not found in userTable');
-    return NextResponse.json(
-      {
-        message: "Unauthorized",
-      },
-      { status: 401 }
-    );
-  }
-
-  // Update this function to return different values based on plan type
-  const getAllowedPrompts = (planType: string): number => {
-    switch (planType.toLowerCase()) {
-      case 'professional':
-        return 100;
-      case 'executive':
-        return 200;
-      case 'basic':
-      default:
-        return 10;
-    }
-  };
+  const requestId = generateRequestId();
+  const startTime = Date.now();
 
   try {
-    console.log('Incoming webhook data:', JSON.stringify(incomingData, null, 2));
+    const incomingData = await request.json() as unknown;
 
-    const timestamp = new Date().toISOString();
-    const newPromptResult = { timestamp, data: incomingData };
+    const urlObj = new URL(request.url);
+    const user_id = urlObj.searchParams.get("user_id");
+    const webhook_secret = urlObj.searchParams.get("webhook_secret");
 
-    // Get the current promptsResult array or initialize it if it doesn't exist
-    const currentPromptsResult = Array.isArray(userData.promptsResult) 
-      ? userData.promptsResult 
-      : [];
+    logger.info('Prompt webhook received', {
+      requestId,
+      userId: user_id || undefined,
+      timestamp: new Date().toISOString(),
+    });
 
-    console.log('Current promptsResult:', JSON.stringify(currentPromptsResult, null, 2));
-
-    // Add the new prompt result to the array
-    const updatedPromptsResult = [...currentPromptsResult, newPromptResult];
-
-    console.log('Updated promptsResult:', JSON.stringify(updatedPromptsResult, null, 2));
-
-    // Get the user's plan type and check prompt limit
-    const userPlanType = userData.planType || 'basic';
-    const allowedPrompts = getAllowedPrompts(userPlanType);
-    const currentPromptCount = updatedPromptsResult.length;
-
-    console.log("User plan type:", userPlanType);
-    console.log("Allowed prompts:", allowedPrompts);
-    console.log("Current prompt count:", currentPromptCount);
-
-    if (currentPromptCount > allowedPrompts) {
+    if (!webhook_secret) {
+      logger.warn('Webhook secret missing', { requestId, userId: user_id || undefined });
       return NextResponse.json(
-        {
-          message: "Prompt limit exceeded for your plan.",
-        },
-        { status: 403 }
+        { message: "Malformed URL, no webhook_secret detected!" },
+        { status: 400 }
       );
     }
 
-    // Check if this is the last allowed prompt
-    const isLastAllowedPrompt = currentPromptCount === allowedPrompts;
-
-    // Prepare the update object
-    const updateObject: { promptsResult: any[]; workStatus?: string } = {
-      promptsResult: updatedPromptsResult
-    };
-
-    // If current workStatus is "ongoing", change it to "complete"
-    if (userData.workStatus === 'ongoing') {
-      updateObject.workStatus = 'complete';
-      console.log("Work status changed from ongoing to complete");
+    if (!validateWebhookSecret(webhook_secret, appWebhookSecret as string)) {
+      logger.error('Invalid webhook secret', { requestId, userId: user_id || undefined });
+      return NextResponse.json({ message: "Unauthorized!" }, { status: 401 });
     }
 
-    console.log("updateObject:", JSON.stringify(updateObject, null, 2));
+    if (!user_id) {
+      logger.warn('User ID missing', { requestId });
+      return NextResponse.json(
+        { message: "Malformed URL, no user_id detected!" },
+        { status: 400 }
+      );
+    }
 
-    // Update promptsResult and potentially workStatus in the database
-    const { data: userUpdated, error: userUpdatedError } = await supabase
-      .from('userTable')
-      .update(updateObject)
-      .eq('id', user_id);
+    const timestamp = new Date().toISOString();
+    const idempotencyKey = generateIdempotencyKey(user_id, timestamp);
+    if (checkIdempotency(processedWebhooks, idempotencyKey)) {
+      logger.info('Duplicate webhook detected, skipping', {
+        requestId,
+        userId: user_id,
+        idempotencyKey,
+      });
+      return NextResponse.json(
+        { message: "Webhook already processed" },
+        { status: 200 }
+      );
+    }
 
-    // Log success response
-    console.log("Success response:", { message: "success", userId: user_id, userUpdated, isLastAllowedPrompt });
-    
-    return NextResponse.json(
+    const supabase = createClient(
+      supabaseUrl as string,
+      supabaseServiceRoleKey as string,
       {
-        message: `Webhook Callback Success! User ID: ${user_id}, User Updated: ${userUpdated ? 'Yes' : 'No'}, Last Allowed Prompt: ${isLastAllowedPrompt}`,
-      },
-      { status: 200, statusText: "Success" }
+        auth: {
+          autoRefreshToken: false,
+          persistSession: false,
+          detectSessionInUrl: false,
+        },
+      }
     );
-  } catch (e) {
-    console.error('Error processing webhook:', e);
-    return NextResponse.json(
-      {
-        message: "Something went wrong!",
+
+    const { data: userData, error: userError } = await supabase
+      .from('userTable')
+      .select('id, email, workStatus, promptsResult, planType')
+      .eq('id', user_id)
+      .single();
+
+    if (userError) {
+      logger.error('Error fetching user from userTable', {
+        requestId,
+        userId: user_id,
+        error: userError.message,
+      });
+      return NextResponse.json(
+        { message: "Error fetching user data" },
+        { status: 500 }
+      );
+    }
+
+    if (!userData) {
+      logger.warn('User not found in userTable', { requestId, userId: user_id });
+      return NextResponse.json(
+        { message: "User not found" },
+        { status: 404 }
+      );
+    }
+
+    const getAllowedPrompts = (planType: string): number => {
+      switch (planType.toLowerCase()) {
+        case 'professional':
+          return 100;
+        case 'executive':
+          return 200;
+        case 'basic':
+        default:
+          return 10;
+      }
+    };
+
+    const result = await processWebhookWithRetry(
+      { userData, user_id, incomingData, timestamp },
+      async (data) => {
+        const newPromptResult = { timestamp: data.timestamp, data: data.incomingData };
+        const currentPromptsResult = Array.isArray(data.userData.promptsResult) 
+          ? data.userData.promptsResult 
+          : [];
+        const updatedPromptsResult = [...currentPromptsResult, newPromptResult];
+
+        const userPlanType = data.userData.planType || 'basic';
+        const allowedPrompts = getAllowedPrompts(userPlanType);
+        const currentPromptCount = updatedPromptsResult.length;
+
+        logger.debug('Processing prompt webhook', {
+          requestId,
+          userId: data.user_id,
+          planType: userPlanType,
+          allowedPrompts,
+          currentPromptCount,
+        });
+
+        if (currentPromptCount > allowedPrompts) {
+          throw new Error('Prompt limit exceeded for plan');
+        }
+
+        const updateObject: { promptsResult: any[]; workStatus?: string } = {
+          promptsResult: updatedPromptsResult
+        };
+
+        if (data.userData.workStatus === 'ongoing') {
+          updateObject.workStatus = 'complete';
+        }
+
+        const { error: userUpdatedError } = await supabase
+          .from('userTable')
+          .update(updateObject)
+          .eq('id', data.user_id);
+
+        if (userUpdatedError) {
+          throw new Error(`Failed to update user: ${userUpdatedError.message}`);
+        }
+
+        return { promptCount: currentPromptCount, allowedPrompts };
       },
+      'Prompt webhook processing'
+    );
+
+    const duration = Date.now() - startTime;
+
+    if (result.success) {
+      logger.info('Prompt webhook processed successfully', {
+        requestId,
+        userId: user_id,
+        duration,
+      });
+
+      return NextResponse.json(
+        {
+          message: "Webhook processed successfully",
+          userId: user_id,
+        },
+        { status: 200 }
+      );
+    } else {
+      logger.error('Prompt webhook processing failed after retries', {
+        requestId,
+        userId: user_id,
+        error: result.error,
+        duration,
+      });
+
+      return NextResponse.json(
+        { message: result.error || "Failed to process webhook" },
+        { status: 500 }
+      );
+    }
+  } catch (error: any) {
+    const duration = Date.now() - startTime;
+    logger.critical('Prompt webhook exception', {
+      requestId,
+      error: error.message,
+      stack: error.stack,
+      duration,
+    });
+
+    return NextResponse.json(
+      { message: "Internal server error" },
       { status: 500 }
     );
   }
