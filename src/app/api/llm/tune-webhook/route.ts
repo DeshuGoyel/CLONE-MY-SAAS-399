@@ -1,29 +1,34 @@
 import { createClient } from "@supabase/supabase-js";
 import { NextResponse } from "next/server";
 import { createPrompt } from "../prompt/createPrompt";
+import { logger } from "@/lib/logger";
+import { validateWebhookSecret, processWebhookWithRetry, generateIdempotencyKey, checkIdempotency } from "@/lib/webhookHelpers";
+import { generateRequestId } from "@/lib/apiHelpers";
 
 export const dynamic = "force-dynamic";
 
-// Environment variables for Supabase and webhook secret1
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL; // Supabase URL
-const supabaseServiceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY; // Supabase service role key
-const appWebhookSecret = process.env.APP_WEBHOOK_SECRET; // Webhook secret for authentication
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+const supabaseServiceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const appWebhookSecret = process.env.APP_WEBHOOK_SECRET;
 
-// Check for required environment variables
 if (!supabaseUrl) {
-  throw new Error("MISSING NEXT_PUBLIC_SUPABASE_URL!"); // Error if Supabase URL is missing
+  throw new Error("MISSING NEXT_PUBLIC_SUPABASE_URL!");
 }
 
 if (!supabaseServiceRoleKey) {
-  throw new Error("MISSING SUPABASE_SERVICE_ROLE_KEY!"); // Error if service role key is missing
+  throw new Error("MISSING SUPABASE_SERVICE_ROLE_KEY!");
 }
 
 if (!appWebhookSecret) {
-  throw new Error("MISSING APP_WEBHOOK_SECRET!"); // Error if webhook secret is missing
+  throw new Error("MISSING APP_WEBHOOK_SECRET!");
 }
 
+const processedWebhooks = new Set<string>();
+
 export async function POST(request: Request) {
-  // Define the structure of incoming tune data
+  const requestId = generateRequestId();
+  const startTime = Date.now();
+
   type TuneData = {
     id: number | string;
     title: string;
@@ -36,147 +41,166 @@ export async function POST(request: Request) {
     expires_at: null;
   };
 
-  // Parse incoming JSON data
-  const incomingData = (await request.json()) as { tune: TuneData };
-  const { tune } = incomingData;
-
-  // Extract user_id and webhook_secret from the request URL
-  const urlObj = new URL(request.url);
-  const user_id = urlObj.searchParams.get("user_id");
-  const webhook_secret = urlObj.searchParams.get("webhook_secret");
-
-  // Check for webhook_secret in the URL
-  if (!webhook_secret) {
-    return NextResponse.json(
-      {
-        message: "Malformed URL, no webhook_secret detected!",
-      },
-      { status: 500 }
-    );
-  }
-
-  // Validate the webhook_secret against the stored secret
-  if (webhook_secret.toLowerCase() !== appWebhookSecret?.toLowerCase()) {
-    return NextResponse.json(
-      {
-        message: "Unauthorized!",
-      },
-      { status: 401 }
-    );
-  }
-
-  // Check for user_id in the URL
-  if (!user_id) {
-    return NextResponse.json(
-      {
-        message: "Malformed URL, no user_id detected!",
-      },
-      { status: 500 }
-    );
-  }
-
-  // Create a Supabase admin client
-  const supabase = createClient(
-    supabaseUrl as string,
-    supabaseServiceRoleKey as string,
-    {
-      auth: {
-        autoRefreshToken: false,
-        persistSession: false,
-        detectSessionInUrl: false,
-      },
-    }
-  );
-
-  // Fetch user from userTable by ID using admin access
-  const { data: userData, error } = await supabase
-    .from('userTable')
-    .select()
-    .eq('id', user_id)
-    .single();
-
-  // Handle errors in fetching user
-  if (error) {
-    console.error("Error fetching user data:", error);
-    return NextResponse.json(
-      {
-        message: "Error fetching user data",
-      },
-      { status: 500 }
-    );
-  }
-
-  // Check if user exists
-  if (!userData) {
-    console.log("User not found");
-    return NextResponse.json(
-      {
-        message: "User not found",
-      },
-      { status: 404 }
-    );
-  }
-
   try {
-    // Update model status in the database
-    const { data: modelUpdated, error: modelUpdatedError } = await supabase
-      .from("userTable")
-      .update({
-        tuneStatus: "completed",
-      })
-      .eq("id", user_id)
-      .select();
+    const incomingData = (await request.json()) as { tune: TuneData };
+    const { tune } = incomingData;
 
-    // Handle errors in updating model
-    if (modelUpdatedError) {
-      console.error({ modelUpdatedError });
+    const urlObj = new URL(request.url);
+    const user_id = urlObj.searchParams.get("user_id");
+    const webhook_secret = urlObj.searchParams.get("webhook_secret");
+
+    logger.info('Tune webhook received', {
+      requestId,
+      userId: user_id || undefined,
+      tuneId: tune?.id,
+      timestamp: new Date().toISOString(),
+    });
+
+    if (!webhook_secret) {
+      logger.warn('Webhook secret missing', { requestId, userId: user_id || undefined });
       return NextResponse.json(
-        {
-          message: "Something went wrong!",
-        },
-        { status: 500 }
+        { message: "Malformed URL, no webhook_secret detected!" },
+        { status: 400 }
       );
     }
 
-    // Check if model was updated
-    if (!modelUpdated) {
-      console.error("No model updated!");
-      console.error({ modelUpdated });
-    }
-
-    // Log the user object received from Supabase
-    console.log("User received from Supabase:", [userData]);
-
-    // Call createPrompt function
-    console.log("Attempting to create prompts...");
-    const promptResults = await createPrompt([userData]);
-
-    if ('error' in promptResults && promptResults.error) {
-      console.error("Error creating prompts:", promptResults.message);
+    if (!validateWebhookSecret(webhook_secret, appWebhookSecret as string)) {
+      logger.error('Invalid webhook secret', { requestId, userId: user_id || undefined });
       return NextResponse.json(
-        {
-          message: "Error creating prompts",
-        },
-        { status: 500 }
+        { message: "Unauthorized!" },
+        { status: 401 }
       );
     }
 
-    console.log("Prompts created successfully:", promptResults);
+    if (!user_id) {
+      logger.warn('User ID missing', { requestId });
+      return NextResponse.json(
+        { message: "Malformed URL, no user_id detected!" },
+        { status: 400 }
+      );
+    }
 
-    // Log success response
-    console.log("Success response:", { message: "success", userId: userData.id, modelUpdated, promptResults });
-    return NextResponse.json(
+    const idempotencyKey = generateIdempotencyKey(user_id, tune.created_at);
+    if (checkIdempotency(processedWebhooks, idempotencyKey)) {
+      logger.info('Duplicate webhook detected, skipping', {
+        requestId,
+        userId: user_id,
+        idempotencyKey,
+      });
+      return NextResponse.json(
+        { message: "Webhook already processed" },
+        { status: 200 }
+      );
+    }
+
+    const supabase = createClient(
+      supabaseUrl as string,
+      supabaseServiceRoleKey as string,
       {
-        message: `Webhook Callback Success! User ID: ${userData.id}, Model Updated: ${modelUpdated ? 'Yes' : 'No'}, Prompts Created: ${promptResults}`,
-      },
-      { status: 200, statusText: "Success" }
+        auth: {
+          autoRefreshToken: false,
+          persistSession: false,
+          detectSessionInUrl: false,
+        },
+      }
     );
-  } catch (e) {
-    console.error(e);
-    return NextResponse.json(
-      {
-        message: "Something went wrong!",
+
+    const { data: userData, error } = await supabase
+      .from('userTable')
+      .select('id, email, tuneStatus, workStatus, promptsResult, planType')
+      .eq('id', user_id)
+      .single();
+
+    if (error) {
+      logger.error("Error fetching user data", {
+        requestId,
+        userId: user_id,
+        error: error.message,
+      });
+      return NextResponse.json(
+        { message: "Error fetching user data" },
+        { status: 500 }
+      );
+    }
+
+    if (!userData) {
+      logger.warn("User not found", { requestId, userId: user_id });
+      return NextResponse.json(
+        { message: "User not found" },
+        { status: 404 }
+      );
+    }
+
+    const result = await processWebhookWithRetry(
+      { userData, user_id, tune },
+      async (data) => {
+        const { data: modelUpdated, error: modelUpdatedError } = await supabase
+          .from("userTable")
+          .update({ tuneStatus: "completed" })
+          .eq("id", data.user_id)
+          .select();
+
+        if (modelUpdatedError) {
+          throw new Error(`Failed to update model: ${modelUpdatedError.message}`);
+        }
+
+        logger.info("Model status updated", {
+          requestId,
+          userId: data.user_id,
+          tuneId: data.tune.id,
+        });
+
+        const promptResults = await createPrompt([data.userData]);
+
+        if ('error' in promptResults && promptResults.error) {
+          throw new Error(`Failed to create prompts: ${promptResults.message}`);
+        }
+
+        return { modelUpdated, promptResults };
       },
+      'Tune webhook processing'
+    );
+
+    const duration = Date.now() - startTime;
+
+    if (result.success) {
+      logger.info('Tune webhook processed successfully', {
+        requestId,
+        userId: user_id,
+        duration,
+      });
+
+      return NextResponse.json(
+        {
+          message: `Webhook processed successfully`,
+          userId: user_id,
+        },
+        { status: 200 }
+      );
+    } else {
+      logger.error('Tune webhook processing failed after retries', {
+        requestId,
+        userId: user_id,
+        error: result.error,
+        duration,
+      });
+
+      return NextResponse.json(
+        { message: "Failed to process webhook after retries" },
+        { status: 500 }
+      );
+    }
+  } catch (error: any) {
+    const duration = Date.now() - startTime;
+    logger.critical('Tune webhook exception', {
+      requestId,
+      error: error.message,
+      stack: error.stack,
+      duration,
+    });
+
+    return NextResponse.json(
+      { message: "Internal server error" },
       { status: 500 }
     );
   }

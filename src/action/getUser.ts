@@ -1,33 +1,45 @@
 "use server"
 import { createClient } from "@/utils/supabase/server";
+import { cache, cacheKeys } from "@/lib/cache";
+import { logger } from "@/lib/logger";
 
 export default async function getUser() {
   const supabase = createClient();
   
-  // Get the current authenticated user
   const { data: { user } } = await supabase.auth.getUser();
   const userId = user?.id;
 
   if (!userId) {
-    console.error("No authenticated user found");
+    logger.warn("No authenticated user found");
     return null;
   }
 
-  // Query the 'userTable' for the current user's data
+  const cacheKey = cacheKeys.user(userId);
+  const cached = cache.get<any[]>(cacheKey);
+
+  if (cached) {
+    logger.debug("User data cache hit", { userId });
+    return cached;
+  }
+
   const { data, error } = await supabase
     .from('userTable')
-    .select()
+    .select('id, email, name, planType, paymentStatus, workStatus, tuneStatus, promptsResult, downloadHistory, userPhotos, styles, gender, age, ethnicity, height, bodyType, eyeColor, created_at, submissionDate, regenerationCount, referralCode, referrals, referralRewards')
     .eq('id', userId);
  
   if (error) {
-    console.error("Error fetching user data from Supabase:", error);
+    logger.error("Error fetching user data from Supabase", {
+      userId,
+      error: error.message,
+    });
     return null;
   }
 
   if (data && data.length > 0) {
+    cache.set(cacheKey, data, 60);
     return data;
   } else {
-    console.warn("No user data found for the current user");
+    logger.warn("No user data found for the current user", { userId });
     return null;
   }
 }
