@@ -38,6 +38,7 @@ export default async function Signup({ searchParams }: SignupProps) {
                 name="password"
                 placeholder="••••••••"
                 type="password"
+                autoComplete="new-password"
               />
               <AuthButton formAction={signUp} pendingText="Signing Up...">
                 Sign Up

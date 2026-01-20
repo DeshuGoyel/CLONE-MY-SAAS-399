@@ -1,5 +1,5 @@
 "use client";
-import React, { useState } from "react";
+import React, { useRef, useState } from "react";
 import { useFormStatus } from "react-dom";
 import { type ComponentProps } from "react";
 
@@ -8,29 +8,51 @@ interface InputProps {
   name: string;
   placeholder: string;
   type?: string;
+  autoComplete?: string;
 }
 
-const EmailInput: React.FC<InputProps> = ({ label, name, placeholder }) => {
+const EmailInput: React.FC<InputProps> = ({
+  label,
+  name,
+  placeholder,
+  type,
+}) => {
   return (
     <div className="mb-4">
       <label className="text-md" htmlFor={name}>
         {label}
       </label>
       <input
+        id={name}
         className="rounded-md px-4 py-2 bg-gray-100 border border-gray-300 text-gray-800 w-full mt-1"
-        type="email"
+        type={type ?? "email"}
         name={name}
         placeholder={placeholder}
+        autoComplete="email"
         required
       />
     </div>
   );
 };
 
-const PasswordInput: React.FC<InputProps> = ({ label, name, placeholder }) => {
-  const [showPassword, setShowPassword] = useState<boolean>(false);
+const PasswordInput: React.FC<InputProps> = ({
+  label,
+  name,
+  placeholder,
+  autoComplete,
+}) => {
+  const [showPassword, setShowPassword] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+
   const togglePasswordVisibility = (): void => {
+    const currentValue = inputRef.current?.value ?? "";
     setShowPassword((prev) => !prev);
+
+    requestAnimationFrame(() => {
+      if (inputRef.current) {
+        inputRef.current.value = currentValue;
+      }
+    });
   };
 
   return (
@@ -40,15 +62,21 @@ const PasswordInput: React.FC<InputProps> = ({ label, name, placeholder }) => {
       </label>
       <div className="relative mt-1">
         <input
-          className="rounded-md px-4 py-2 bg-gray-100 border border-gray-300 text-gray-800 w-full pr-10"
+          ref={inputRef}
+          id={name}
+          className="rounded-md px-4 py-2 bg-gray-100 border border-gray-300 text-gray-800 w-full pr-12"
           type={showPassword ? "text" : "password"}
           name={name}
           placeholder={placeholder}
+          autoComplete={autoComplete ?? "current-password"}
           required
         />
         <button
           type="button"
-          className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-600 hover:text-gray-800"
+          aria-label={showPassword ? "Hide password" : "Show password"}
+          aria-pressed={showPassword}
+          className="absolute inset-y-0 right-0 flex items-center pr-3 text-gray-600 hover:text-gray-800 z-10"
+          onMouseDown={(e) => e.preventDefault()}
           onClick={togglePasswordVisibility}
         >
           {showPassword ? (

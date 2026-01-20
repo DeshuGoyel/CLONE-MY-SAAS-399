@@ -127,6 +127,7 @@ export default async function Login({ searchParams }: LoginProps) {
                 name="password"
                 placeholder="••••••••"
                 type="password"
+                autoComplete="current-password"
               />
               <AuthButton formAction={signIn} pendingText="Signing In...">
                 Sign In
