@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import Image from "next/image";
 import { useImageUpload } from "@/hooks/useImageUpload";
 
@@ -23,11 +23,17 @@ const FileUploadArea: React.FC<FileUploadAreaProps> = ({
 }) => {
   const [error, setError] = useState<string | null>(null);
   const [hasLowResImage, setHasLowResImage] = useState(false);
-  const [isUploading, setIsUploadingState] = useState(false);
+  const [isDragging, setIsDragging] = useState(false);
+  const [showUploadControls, setShowUploadControls] = useState(true);
   const {
     uploadImages,
     isUploading: uploadIsUploading,
     error: uploadError,
+    uploadProgress,
+    pauseUpload,
+    resumeUpload,
+    isPaused,
+    resetProgress,
   } = useImageUpload();
 
   // Handles file selection
@@ -61,6 +67,43 @@ const FileUploadArea: React.FC<FileUploadAreaProps> = ({
     }
   };
 
+  // Handle drag and drop
+  const handleDragEnter = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(true);
+  };
+
+  const handleDragLeave = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+  };
+
+  const handleDragOver = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+  };
+
+  const handleDrop = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+    
+    const files = e.dataTransfer.files;
+    if (files && files.length > 0) {
+      const fileInput = document.getElementById("file-upload") as HTMLInputElement;
+      if (fileInput) {
+        const dataTransfer = new DataTransfer();
+        Array.from(files).slice(0, maxImages - images.length).forEach(file => {
+          dataTransfer.items.add(file);
+        });
+        fileInput.files = dataTransfer.files;
+        handleFileChange({ target: fileInput } as React.ChangeEvent<HTMLInputElement>);
+      }
+    }
+  };
+
   // Removes an image from the list
   const handleDelete = (index: number) => {
     setImages((prevImages) => {
@@ -85,12 +128,25 @@ const FileUploadArea: React.FC<FileUploadAreaProps> = ({
     }
   };
 
+  // Toggle upload controls visibility
+  const toggleUploadControls = () => {
+    setShowUploadControls(!showUploadControls);
+  };
+
   return (
     <div>
       {/* File upload area */}
       <div
-        className="border-2 border-dashed border-mainBlack rounded-lg p-8 text-center mb-4 cursor-pointer hover:bg-mainOrange/20 hover:border-mainOrange transition-all duration-300"
+        className={`border-2 border-dashed rounded-lg p-8 text-center mb-4 cursor-pointer transition-all duration-300 ${
+          isDragging 
+            ? 'border-mainOrange bg-mainOrange/20'
+            : 'border-mainBlack hover:bg-mainOrange/20 hover:border-mainOrange'
+        }`}
         onClick={() => document.getElementById("file-upload")?.click()}
+        onDragEnter={handleDragEnter}
+        onDragLeave={handleDragLeave}
+        onDragOver={handleDragOver}
+        onDrop={handleDrop}
       >
         <svg
           className="mx-auto h-12 w-12 text-mainBlack"
@@ -106,10 +162,13 @@ const FileUploadArea: React.FC<FileUploadAreaProps> = ({
           />
         </svg>
         <p className="mt-2 text-sm text-mainBlack">
-          Choose an image or drag & drop it here
+          {isDragging ? 'Drop images here' : 'Choose an image or drag & drop it here'}
         </p>
         <p className="text-xs text-mainBlack mt-1">
-          JPEG and PNG formats, up to 50MB
+          JPEG and PNG formats, up to 50MB total
+        </p>
+        <p className="text-xs text-gray-500 mt-1">
+          Minimum 300x300, Maximum 8000x8000 pixels
         </p>
         <button
           className="mt-4 px-4 py-2 border border-mainBlack rounded-md text-sm font-medium text-mainBlack hover:bg-mainOrange hover:text-mainWhite hover:border-mainOrange transition-colors duration-300"
@@ -154,29 +213,39 @@ const FileUploadArea: React.FC<FileUploadAreaProps> = ({
                 continue
               </span>
             ) : (
-              <button
-                onClick={handleUploadAndContinue}
-                disabled={isUploading}
-                className={`text-mainBlack hover:text-mainOrange transition-colors duration-300 flex items-center gap-1 font-semibold ${
-                  isUploading ? "opacity-50 cursor-not-allowed" : ""
-                }`}
-              >
-                {isUploading ? "Uploading..." : "Continue to next step"}
-                {!isUploading && (
-                  <svg
-                    xmlns="http://www.w3.org/2000/svg"
-                    className="h-4 w-4"
-                    viewBox="0 0 20 20"
-                    fill="currentColor"
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={handleUploadAndContinue}
+                  disabled={isUploading || isPaused}
+                  className={`text-mainBlack hover:text-mainOrange transition-colors duration-300 flex items-center gap-1 font-semibold ${
+                    isUploading || isPaused ? "opacity-50 cursor-not-allowed" : ""
+                  }`}
+                >
+                  {isUploading ? "Uploading..." : isPaused ? "Paused" : "Continue to next step"}
+                  {!isUploading && !isPaused && (
+                    <svg
+                      xmlns="http://www.w3.org/2000/svg"
+                      className="h-4 w-4"
+                      viewBox="0 0 20 20"
+                      fill="currentColor"
+                    >
+                      <path
+                        fillRule="evenodd"
+                        d="M10.293 3.293a1 1 0 011.414 0l6 6a1 1 0 010 1.414l-6 6a1 1 0 01-1.414-1.414L14.586 11H3a1 1 0 110-2h11.586l-4.293-4.293a1 1 0 010-1.414z"
+                        clipRule="evenodd"
+                      />
+                    </svg>
+                  )}
+                </button>
+                {uploadProgress.length > 0 && (
+                  <button
+                    onClick={isPaused ? resumeUpload : pauseUpload}
+                    className="px-3 py-1 text-xs border border-mainBlack rounded-md hover:bg-mainBlack hover:text-mainWhite transition-colors"
                   >
-                    <path
-                      fillRule="evenodd"
-                      d="M10.293 3.293a1 1 0 011.414 0l6 6a1 1 0 010 1.414l-6 6a1 1 0 01-1.414-1.414L14.586 11H3a1 1 0 110-2h11.586l-4.293-4.293a1 1 0 010-1.414z"
-                      clipRule="evenodd"
-                    />
-                  </svg>
+                    {isPaused ? 'Resume' : 'Pause'}
+                  </button>
                 )}
-              </button>
+              </div>
             )}
           </div>
           <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">

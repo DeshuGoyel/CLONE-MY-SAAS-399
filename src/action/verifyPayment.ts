@@ -1,43 +1,66 @@
 // app/actions/verifyPayment.ts
 'use server'
 import { createClient } from "@/utils/supabase/server";
-import Stripe from 'stripe';
+import { StripeHelper } from '@/lib/stripeHelper';
+import { logger } from '@/lib/logger';
+import { generateRequestId } from '@/lib/apiHelpers';
 
-const stripeKey = process.env.ENVIRONMENT === 'DEVELOPMENT' 
-  ? process.env.STRIPE_TEST_SECRET_KEY! 
+const stripeKey = process.env.ENVIRONMENT === 'DEVELOPMENT'
+  ? process.env.STRIPE_TEST_SECRET_KEY!
   : process.env.STRIPE_SECRET_KEY!;
 
-const stripe = new Stripe(stripeKey, {
-  apiVersion: '2024-06-20',
+const stripeHelper = new StripeHelper(stripeKey, {
+  maxRetries: 3,
+  retryDelay: 1000,
+  timeoutMs: 30000,
 });
 
 export async function verifyPayment(sessionId: string) {
+  const requestId = generateRequestId();
+  const startTime = Date.now();
+
   if (!sessionId) {
+    logger.warn('Missing session_id parameter', { requestId });
     throw new Error('Missing session_id parameter');
   }
 
   try {
-    console.log('Retrieving session:', sessionId);
-    const session = await stripe.checkout.sessions.retrieve(sessionId);
-    console.log('Session retrieved:', session);
+    logger.info('Retrieving Stripe session', { requestId, sessionId });
+
+    const session = await stripeHelper.retrieveSession(sessionId);
+
     // Extract planType from metadata
     const planType: string | undefined = session.metadata?.planType;
+    const customerEmail = session.customer_details?.email;
 
-    // Console log the planType
-    console.log('Plan Type:', planType);
+    logger.info('Stripe session retrieved', {
+      requestId,
+      sessionId,
+      status: session.payment_status,
+      planType,
+      customerEmail,
+    });
 
-    if (session.payment_status === 'paid') { 
+    if (session.payment_status === 'paid') {
       // Update user's plan in the database
-      await updatePlan({ 
-        paymentStatus: session.payment_status, 
+      await updatePlan({
+        paymentStatus: session.payment_status,
         amount: session.amount_total ?? 0,
-        planType: planType ?? 'default' // Pass planType to updatePlan
+        planType: planType ?? 'default',
+        customerEmail: customerEmail,
+      }, requestId);
+
+      logger.info('Payment successful and plan updated', {
+        requestId,
+        sessionId,
+        planType,
       });
-      console.log('Payment successful', session.payment_status);
     }
 
-    return { 
-      success: session.payment_status === 'paid', 
+    const duration = Date.now() - startTime;
+
+    return {
+      success: session.payment_status === 'paid',
       status: session.payment_status,
       details: {
         id: session.id,
@@ -45,39 +68,74 @@ export async function verifyPayment(sessionId: string) {
         amount_total: session.amount_total,
         currency: session.currency,
         payment_status: session.payment_status,
-      }
+        customer_email: customerEmail,
+      },
+      requestId,
+      duration,
     };
-  } catch (error) {
-    console.error('Error in verifyPayment:', error);
-    throw error;
+  } catch (error: any) {
+    logger.error('Error in verifyPayment', {
+      requestId,
+      sessionId,
+      error: error.message,
+      stack: error.stack,
+    });
+    throw new Error(`Payment verification failed: ${error.message}`);
   }
 }
 
-async function updatePlan({paymentStatus, amount, planType}: { paymentStatus: string, amount: number, planType: string }) {
-    const supabase = createClient();
-    const { data: { user }, error: authError } = await supabase.auth.getUser();
+async function updatePlan({paymentStatus, amount, planType, customerEmail}: {
+  paymentStatus: string,
+  amount: number,
+  planType: string,
+  customerEmail?: string
+}, requestId: string) {
+  const supabase = createClient();
+  const { data: { user }, error: authError } = await supabase.auth.getUser();
 
-    if (authError || !user) {
-        throw new Error("User not authenticated");
-    }
+  if (authError || !user) {
+    logger.error('User not authenticated during plan update', {
+      requestId,
+      error: authError?.message,
+    });
+    throw new Error("User not authenticated");
+  }
 
-    const updateObject = { 
-        paymentStatus, 
-        amount, 
-        planType,
-        paid_at: new Date().toISOString()
-    };  
+  const updateObject = {
+    paymentStatus,
+    amount,
+    planType,
+    paid_at: new Date().toISOString(),
+    email: customerEmail || user.email,
+  };
 
-    const { data, error } = await supabase
-      .from("userTable")
-      .update(updateObject)
-      .eq('id', user.id)
-      .select();
+  logger.debug('Updating user plan in database', {
+    requestId,
+    userId: user.id,
+    planType,
+    paymentStatus,
+  });
 
-    if (error) {
-        console.error("Error updating plan:", error);
-        throw error;
-    }
+  const { data, error } = await supabase
+    .from("userTable")
+    .update(updateObject)
+    .eq('id', user.id)
+    .select();
 
-    return data;
+  if (error) {
+    logger.error("Error updating plan in database", {
+      requestId,
+      userId: user.id,
+      error: error.message,
+    });
+    throw new Error(`Failed to update plan: ${error.message}`);
+  }
+
+  logger.info('Plan updated successfully', {
+    requestId,
+    userId: user.id,
+    planType,
+  });
+
+  return data;
 }

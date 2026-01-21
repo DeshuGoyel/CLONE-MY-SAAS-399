@@ -3,6 +3,8 @@ import { NextResponse } from "next/server";
 import { logger } from "@/lib/logger";
 import { validateWebhookSecret, processWebhookWithRetry, generateIdempotencyKey, checkIdempotency } from "@/lib/webhookHelpers";
 import { generateRequestId } from "@/lib/apiHelpers";
+import { WebhookValidator } from "@/lib/webhookValidator";
+import { IdempotencyManager } from "@/lib/idempotencyManager";
 
 export const dynamic = "force-dynamic";
 
@@ -22,23 +24,62 @@ if (!appWebhookSecret) {
   throw new Error("MISSING APP_WEBHOOK_SECRET!");
 }
 
-const processedWebhooks = new Set<string>();
+const webhookValidator = new WebhookValidator();
+const idempotencyManager = new IdempotencyManager();
+
+// Initialize idempotency manager
+idempotencyManager.initialize().catch((error) => {
+  logger.error('Failed to initialize idempotency manager', {
+    error: error.message,
+  });
+});
 
 export async function POST(request: Request) {
   const requestId = generateRequestId();
   const startTime = Date.now();
+  const clientIp = request.headers.get('x-forwarded-for') || request.headers.get('x-real-ip') || 'unknown';
 
   try {
-    const incomingData = await request.json() as unknown;
-
+    // Validate rate limits
     const urlObj = new URL(request.url);
     const user_id = urlObj.searchParams.get("user_id");
     const webhook_secret = urlObj.searchParams.get("webhook_secret");
+
+    const rateLimitResult = await webhookValidator.checkRateLimit(
+      user_id || 'anonymous',
+      clientIp,
+      'prompt-webhook'
+    );
+    
+    if (!rateLimitResult.allowed) {
+      logger.warn('Rate limit exceeded', {
+        requestId,
+        userId: user_id || undefined,
+        clientIp,
+        remaining: rateLimitResult.remaining,
+        resetTime: new Date(rateLimitResult.resetTime).toISOString(),
+      });
+      
+      return NextResponse.json(
+        { message: "Rate limit exceeded" },
+        { 
+          status: 429,
+          headers: {
+            'Retry-After': Math.ceil((rateLimitResult.resetTime - Date.now()) / 1000).toString(),
+            'X-RateLimit-Remaining': rateLimitResult.remaining.toString(),
+            'X-RateLimit-Reset': rateLimitResult.resetTime.toString(),
+          }
+        }
+      );
+    }
+
+    const incomingData = await request.json() as unknown;
 
     logger.info('Prompt webhook received', {
       requestId,
       userId: user_id || undefined,
       timestamp: new Date().toISOString(),
+      clientIp,
     });
 
     if (!webhook_secret) {
@@ -49,7 +90,7 @@ export async function POST(request: Request) {
       );
     }
 
-    if (!validateWebhookSecret(webhook_secret, appWebhookSecret as string)) {
+    if (!webhookValidator.validateWebhookSecret(webhook_secret, appWebhookSecret as string)) {
       logger.error('Invalid webhook secret', { requestId, userId: user_id || undefined });
       return NextResponse.json({ message: "Unauthorized!" }, { status: 401 });
     }
@@ -63,8 +104,10 @@ export async function POST(request: Request) {
     }
 
     const timestamp = new Date().toISOString();
-    const idempotencyKey = generateIdempotencyKey(user_id, timestamp);
-    if (checkIdempotency(processedWebhooks, idempotencyKey)) {
+    const idempotencyKey = idempotencyManager.generateIdempotencyKey(user_id, timestamp, 'prompt');
+    const isDuplicate = await idempotencyManager.checkIdempotency(idempotencyKey);
+    
+    if (isDuplicate) {
       logger.info('Duplicate webhook detected, skipping', {
         requestId,
         userId: user_id,
@@ -130,8 +173,8 @@ export async function POST(request: Request) {
       { userData, user_id, incomingData, timestamp },
       async (data) => {
         const newPromptResult = { timestamp: data.timestamp, data: data.incomingData };
-        const currentPromptsResult = Array.isArray(data.userData.promptsResult) 
-          ? data.userData.promptsResult 
+        const currentPromptsResult = Array.isArray(data.userData.promptsResult)
+          ? data.userData.promptsResult
           : [];
         const updatedPromptsResult = [...currentPromptsResult, newPromptResult];
 
@@ -180,14 +223,28 @@ export async function POST(request: Request) {
         requestId,
         userId: user_id,
         duration,
+        clientIp,
       });
+
+      // Mark as processed in idempotency manager
+      await idempotencyManager.markProcessed(idempotencyKey);
+
+      // Log successful webhook processing
+      await webhookValidator.logWebhookRequest(request, user_id, true);
 
       return NextResponse.json(
         {
           message: "Webhook processed successfully",
           userId: user_id,
+          requestId,
         },
-        { status: 200 }
+        {
+          status: 200,
+          headers: {
+            'X-Request-ID': requestId,
+            'X-Processing-Time': duration.toString(),
+          }
+        }
       );
     } else {
       logger.error('Prompt webhook processing failed after retries', {
@@ -195,11 +252,24 @@ export async function POST(request: Request) {
         userId: user_id,
         error: result.error,
         duration,
+        clientIp,
       });
 
+      // Log failed webhook processing
+      await webhookValidator.logWebhookRequest(request, user_id, false, result.error);
+
       return NextResponse.json(
-        { message: result.error || "Failed to process webhook" },
-        { status: 500 }
+        {
+          message: result.error || "Failed to process webhook",
+          error: result.error,
+          requestId
+        },
+        {
+          status: 500,
+          headers: {
+            'X-Request-ID': requestId,
+          }
+        }
       );
     }
   } catch (error: any) {
@@ -209,11 +279,29 @@ export async function POST(request: Request) {
       error: error.message,
       stack: error.stack,
       duration,
+      clientIp,
+    });
+
+    // Log failed webhook processing
+    webhookValidator.logWebhookRequest(request, user_id || null, false, error.message).catch((logError) => {
+      logger.error('Failed to log webhook error', {
+        requestId,
+        error: logError.message,
+      });
     });
 
     return NextResponse.json(
-      { message: "Internal server error" },
-      { status: 500 }
+      { 
+        message: "Internal server error",
+        error: error.message,
+        requestId
+      },
+      { 
+        status: 500,
+        headers: {
+          'X-Request-ID': requestId,
+        }
+      }
     );
   }
 }

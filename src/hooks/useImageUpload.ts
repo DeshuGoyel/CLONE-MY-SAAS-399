@@ -2,59 +2,48 @@ import { useState, useCallback } from 'react';
 import { createClientComponentClient } from "@supabase/auth-helpers-nextjs";
 import { updateUser } from '@/action/updateUser';
 import { validateImage } from '@/lib/imageValidation';
+import { UploadManager } from '@/lib/uploadManager';
+import { logger } from '@/lib/logger';
 
 export interface UploadProgress {
   fileName: string;
   progress: number;
-  status: 'pending' | 'uploading' | 'completed' | 'error';
+  status: 'pending' | 'uploading' | 'completed' | 'error' | 'paused';
   error?: string;
   url?: string;
+  speed?: string;
+  estimatedTime?: string;
 }
 
 export const useImageUpload = () => {
   const [isUploading, setIsUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [uploadProgress, setUploadProgress] = useState<UploadProgress[]>([]);
+  const [isPaused, setIsPaused] = useState(false);
   const supabase = createClientComponentClient();
+  const uploadManager = new UploadManager();
 
   const uploadSingleImage = async (
     file: File,
     userId: string,
-    retryCount: number = 0
+    onProgress?: (progress: number) => void
   ): Promise<{ success: boolean; url?: string; error?: string }> => {
-    const MAX_RETRIES = 3;
-    const RETRY_DELAY = 1000;
-
     try {
-      const fileName = `${Date.now()}-${file.name}`;
-      const filePath = `${userId}/selfies/${fileName}`;
-
-      const { error: uploadError } = await supabase.storage
-        .from("userphotos")
-        .upload(filePath, file, {
-          cacheControl: "3600",
-          upsert: false,
-        });
-
-      if (uploadError) {
-        if (retryCount < MAX_RETRIES) {
-          await new Promise(resolve => 
-            setTimeout(resolve, RETRY_DELAY * Math.pow(2, retryCount))
-          );
-          return uploadSingleImage(file, userId, retryCount + 1);
-        }
-        throw uploadError;
+      const validation = await uploadManager.validateImageDimensions(file);
+      if (!validation.valid) {
+        return { success: false, error: validation.error };
       }
 
-      const { data: { publicUrl } } = supabase.storage
-        .from("userphotos")
-        .getPublicUrl(filePath);
-
-      return { success: true, url: publicUrl };
+      const result = await uploadManager.uploadSingleImage(file, userId, onProgress);
+      return result;
     } catch (error: any) {
-      return { 
-        success: false, 
-        error: error.message || "Upload failed" 
+      logger.error('Image upload failed', {
+        fileName: file.name,
+        error: error.message,
+      });
+      return {
+        success: false,
+        error: error.message || "Upload failed"
       };
     }
   };
@@ -67,11 +56,14 @@ export const useImageUpload = () => {
 
     setIsUploading(true);
     setError(null);
+    setIsPaused(false);
 
     const initialProgress: UploadProgress[] = images.map(({ file }) => ({
       fileName: file.name,
       progress: 0,
       status: 'pending' as const,
+      speed: uploadManager.getUploadSpeedEstimate(file.size),
+      estimatedTime: uploadManager.getUploadSpeedEstimate(file.size),
     }));
     setUploadProgress(initialProgress);
 
@@ -79,61 +71,45 @@ export const useImageUpload = () => {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) throw new Error("Not authenticated");
 
-      for (let i = 0; i < images.length; i++) {
-        const { file } = images[i];
-
-        setUploadProgress(prev => prev.map((item, idx) => 
-          idx === i ? { ...item, status: 'uploading', progress: 0 } : item
-        ));
-
-        const validation = await validateImage(file);
-        if (!validation.valid) {
+      const results = await uploadManager.uploadMultipleImages(
+        images.map(img => img.file),
+        user.id,
+        (fileIndex, progress) => {
           setUploadProgress(prev => prev.map((item, idx) => 
-            idx === i ? { ...item, status: 'error', error: validation.error, progress: 0 } : item
-          ));
-          continue;
-        }
-
-        setUploadProgress(prev => prev.map((item, idx) => 
-          idx === i ? { ...item, progress: 50 } : item
-        ));
-
-        const result = await uploadSingleImage(file, user.id);
-
-        if (result.success) {
-          setUploadProgress(prev => prev.map((item, idx) => 
-            idx === i ? { 
-              ...item, 
-              status: 'completed', 
-              progress: 100,
-              url: result.url 
-            } : item
-          ));
-        } else {
-          setUploadProgress(prev => prev.map((item, idx) => 
-            idx === i ? { 
-              ...item, 
-              status: 'error', 
-              error: result.error,
-              progress: 0 
-            } : item
+            idx === fileIndex ? { ...item, status: 'uploading', progress } : item
           ));
         }
+      );
+
+      if (!results.success) {
+        const errorMessages = results.errors.join('; ');
+        setError(`Upload failed: ${errorMessages}`);
+        
+        setUploadProgress(prev => prev.map((item, idx) => {
+          const hasError = results.errors[idx];
+          return hasError ? { ...item, status: 'error', error: results.errors[idx] } : item;
+        }));
+        
+        return false;
       }
 
-      const uploadedUrls = uploadProgress
-        .filter(p => p.status === 'completed' && p.url)
-        .map(p => p.url!);
+      await updateUser({ userPhotos: { userSelfies: results.urls } });
 
-      if (uploadedUrls.length === 0) {
-        throw new Error("No images were uploaded successfully");
-      }
-
-      await updateUser({ userPhotos: { userSelfies: uploadedUrls } });
+      setUploadProgress(prev => prev.map((item, idx) => 
+        results.urls[idx] ? { 
+          ...item, 
+          status: 'completed', 
+          progress: 100,
+          url: results.urls[idx] 
+        } : item
+      ));
 
       return true;
     } catch (error: any) {
-      console.error("Error uploading images:", error);
+      logger.error('Bulk image upload failed', {
+        error: error.message,
+        stack: error.stack,
+      });
       setError(`Failed to upload images: ${error.message || "Unknown error"}`);
       return false;
     } finally {
@@ -141,9 +117,24 @@ export const useImageUpload = () => {
     }
   };
 
+  const pauseUpload = useCallback(() => {
+    setIsPaused(true);
+    setUploadProgress(prev => prev.map(item => 
+      item.status === 'uploading' ? { ...item, status: 'paused' } : item
+    ));
+  }, []);
+
+  const resumeUpload = useCallback(() => {
+    setIsPaused(false);
+    setUploadProgress(prev => prev.map(item => 
+      item.status === 'paused' ? { ...item, status: 'uploading' } : item
+    ));
+  }, []);
+
   const resetProgress = useCallback(() => {
     setUploadProgress([]);
     setError(null);
+    setIsPaused(false);
   }, []);
 
   return { 
@@ -151,6 +142,9 @@ export const useImageUpload = () => {
     isUploading, 
     error, 
     uploadProgress,
-    resetProgress 
+    resetProgress,
+    pauseUpload,
+    resumeUpload,
+    isPaused
   };
 };
