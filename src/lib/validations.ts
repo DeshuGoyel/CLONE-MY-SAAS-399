@@ -36,8 +36,25 @@ export const analyticsQuerySchema = z.object({
   endDate: z.string().optional(),
 });
 
+export const demoEmailSchema = z.object({
+  email: z.string().email().refine(
+    (email) => {
+      const demoPatterns = ['demo@cvphoto.app', 'test@cvphoto.app'];
+      const demoPrefixPatterns = ['demo+', 'test+'];
+      
+      // Check exact matches
+      if (demoPatterns.includes(email)) return true;
+      
+      // Check prefix patterns
+      return demoPrefixPatterns.some(prefix => email.startsWith(prefix));
+    },
+    'Email must be a valid demo email pattern'
+  ),
+});
+
 export type CustomPromptInput = z.infer<typeof customPromptSchema>;
 export type RegenerateInput = z.infer<typeof regenerateSchema>;
 export type ReferralCodeInput = z.infer<typeof referralCodeSchema>;
 export type ImageUploadInput = z.infer<typeof imageUploadSchema>;
 export type AnalyticsQueryInput = z.infer<typeof analyticsQuerySchema>;
+export type DemoEmailInput = z.infer<typeof demoEmailSchema>;
