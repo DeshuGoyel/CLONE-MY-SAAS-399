@@ -35,6 +35,12 @@ export default function ImageGallery({
   const [isLoading, setIsLoading] = useState(true);
   const [previewIndex, setPreviewIndex] = useState<number | null>(null);
 
+  // Calculate display images
+  const displayImages =
+    promptsResult.length > 0
+      ? promptsResult.map((result) => result.data.prompt.images[0])
+      : images;
+
   const handleDownload = async (index: number) => {
     const imageUrl = displayImages[index];
     const result = await trackDownload(imageUrl, userData);
@@ -94,12 +100,14 @@ export default function ImageGallery({
       setIsLoading(false);
     }
     checkDiscrepancy();
-  }, []);
+  }, [currentCount, planLimit, userData]);
 
-  const displayImages =
-    promptsResult.length > 0
-      ? promptsResult.map((result) => result.data.prompt.images[0])
-      : images;
+  // Auto-open preview modal when images are available and not already open
+  React.useEffect(() => {
+    if (displayImages.length > 0 && previewIndex === null && !isLoading) {
+      setPreviewIndex(0);
+    }
+  }, [displayImages.length, previewIndex, isLoading, promptsResult, userData]);
 
   const handleImageClick = (index: number) => {
     setPreviewIndex(index);
